@@ -10,7 +10,7 @@ const fastify = Fastify();
 
 const pool = new Pool({
   port: 5432,
-  database: 'qa-app',
+  database: 'qa_app',
   host: 'localhost',
   user: 'postgres',
   password: '123456',
