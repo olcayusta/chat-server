@@ -11,7 +11,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "fastify": "^3.27.4",
+    "fastify": "^3.28.0",
     "fastify-compress": "^4.0.1",
     "fastify-cors": "^6.0.3",
     "fastify-etag": "^2.1.0",
@@ -26,7 +26,7 @@
     "@types/ws": "^8.5.3",
     "fastify-autoload": "^3.11.0",
     "nodemon": "^2.0.15",
-    "prettier": "^2.6.1",
+    "prettier": "^2.6.2",
     "ts-node": "^10.7.0",
     "typescript": "^4.6.3"
   }
