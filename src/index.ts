@@ -1,16 +1,15 @@
-import Fastify, { FastifyReply, FastifyRequest } from 'fastify'
+import Fastify, { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import fastifyCors from 'fastify-cors'
 import fastifyEtag from 'fastify-etag'
-import fastifyRateLimit from 'fastify-rate-limit'
+import fastifyAutoload from 'fastify-autoload'
 import { Pool } from 'pg'
-import { Server, ServerOptions, WebSocket, WebSocketServer } from 'ws'
+import { Server, ServerOptions, WebSocket } from 'ws'
 import { nanoid } from 'nanoid'
-import * as Buffer from 'buffer'
+import { join } from 'path'
+import { Message } from './models/message.model'
+import { Room } from './models/room.model'
 
-// @ts-ignore
-const og = require('open-graph')
-
-const fastify = Fastify()
+const fastify: FastifyInstance = Fastify()
 
 const pool = new Pool({
   port: 5432,
@@ -22,7 +21,7 @@ const pool = new Pool({
 
 let rooms: Map<string, Set<string>> = new Map<string, Set<string>>()
 
-class WebSocket1 extends WebSocket {
+class CustomWebSocket extends WebSocket {
   readonly id!: string
 
   constructor(props: any) {
@@ -37,48 +36,25 @@ class WebSocket1 extends WebSocket {
   }
 }
 
-class MyServer extends Server<WebSocket1> {
+class MyWebSocketServer extends Server<CustomWebSocket> {
+  rooms!: Map<string, Set<string>>
+
   constructor(options?: ServerOptions, callback?: () => void) {
     super(options, callback)
+    rooms = new Map<string, Set<string>>()
   }
-
-  rooms: Map<string, Set<string>> = new Map<string, Set<string>>()
 }
 
-/*
-const wss = new WebSocketServer<WebSocket1>({
-  WebSocket: WebSocket1,
+const wss = new MyWebSocketServer({
   server: fastify.server,
-  // @ts-ignore
-  origin: 'http://localhost:4400'
-})
-*/
-
-const wss = new MyServer({
-  WebSocket: WebSocket1,
-  server: fastify.server,
-  // @ts-ignore
-  origin: 'http://localhost:4400'
+  WebSocket: CustomWebSocket
 })
 
 fastify.register(fastifyCors, {
   origin: 'http://localhost:4200'
 })
+
 fastify.register(fastifyEtag)
-/*fastify.register(fastifyRateLimit, {
-  max: 4,
-  timeWindow: '1 minute'
-})*/
-
-fastify.get('/graph', async (req: FastifyRequest, reply: FastifyReply) => {
-  const url = 'https://www.youtube.com/watch?v=o3mP3mJDL2k'
-
-  og(url, async (err: any, data: any) => {
-    if (err) console.log(err)
-    console.log(data)
-    reply.send(data)
-  })
-})
 
 const roomSchema = {
   response: {
@@ -206,12 +182,20 @@ fastify.get(
         SELECT cr.id, cr.title, message
         FROM chat_room cr
                  LEFT JOIN LATERAL (
-            SELECT jsonb_build_object('id', cm.id, 'text', cm.text, 'creationTime', cm."creationTime", 'user',
-                                      (SELECT jsonb_build_object('id', u.id, 'displayName', u."displayName",
-                                                                 'picture',
-                                                                 u.picture)
-                                       FROM "user" u
-                                       WHERE u.id = cm."userId")) message
+            SELECT jsonb_build_object(
+                           'id', cm.id,
+                           'text', cm.text,
+                           'creationTime', cm."creationTime",
+                           'user', (
+                               SELECT jsonb_build_object(
+                                              'id', u.id,
+                                              'displayName', u."displayName",
+                                              'picture', u.picture
+                                          )
+                               FROM "user" u
+                               WHERE u.id = cm."userId"
+                           )
+                       ) message
             FROM chat_message cm
             WHERE cm."roomId" = cr.id
             ORDER BY id DESC
@@ -224,19 +208,18 @@ fastify.get(
   }
 )
 
-interface IParams {
-  roomId: number
-}
-
 fastify.get<{
-  Params: IParams
+  Params: {
+    roomId: number
+  }
 }>(
   '/rooms/:roomId',
   {
     schema: roomSchema
   },
-  async ({ params: { roomId } }, reply: FastifyReply) => {
-    const { rows } = await pool.query(
+  async (req, reply: FastifyReply) => {
+    const { roomId } = req.params
+    const { rows } = await pool.query<Room>(
       `
           SELECT cr.id,
                  cr.title,
@@ -264,7 +247,8 @@ fastify.get<{
       `,
       [roomId]
     )
-    return rows[0] ?? []
+    const room = rows[0]
+    return room ?? []
   }
 )
 
@@ -280,7 +264,7 @@ wss.on('connection', async (ws) => {
     const roomId = payload.roomId
     const userId = payload.user.id
 
-    const { rows } = await pool.query(
+    const { rows } = await pool.query<Message>(
       `
           WITH cte AS (
           INSERT
@@ -289,7 +273,7 @@ wss.on('connection', async (ws) => {
               RETURNING id
               )
           SELECT (SELECT id FROM cte),
-                 jsonb_build_object('id', u.id, 'displayName', u."displayName", 'picture', u.picture) AS "user"
+                 json_build_object('id', u.id, 'displayName', u."displayName", 'picture', u.picture) AS "user"
           FROM "user" u
           WHERE u.id = $1
       `,
@@ -297,6 +281,8 @@ wss.on('connection', async (ws) => {
     )
 
     const roomName = `channel${roomId}`
+
+    const { id, text, type, user } = rows[0]
 
     wss.clients.forEach((client) => {
       if (
@@ -308,10 +294,10 @@ wss.on('connection', async (ws) => {
           JSON.stringify({
             event: 'server message',
             payload: {
-              id: rows[0].id,
-              text: payload.text,
-              type: 'text',
-              user: rows[0].user
+              id,
+              text,
+              type,
+              user
             }
           })
         )
@@ -341,8 +327,6 @@ wss.on('connection', async (ws) => {
     })
 
     console.log(rooms)
-
-    // console.log(rooms)
   })
 
   ws.on('join', (payload) => {
@@ -364,6 +348,16 @@ wss.on('connection', async (ws) => {
   })
 })
 
+/*
+  Fastify Autoload Register Plugin
+ */
+fastify.register(fastifyAutoload, {
+  dir: join(__dirname, 'routes')
+})
+
+/**
+ * Start the server
+ */
 const start = async () => {
   try {
     await fastify.listen(1234)
